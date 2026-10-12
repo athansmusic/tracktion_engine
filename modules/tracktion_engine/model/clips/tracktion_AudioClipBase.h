@@ -73,8 +73,7 @@ private:
     e.g. an AudioFile hash or hash describing the current render set-up of an Edit.
 */
 class AudioClipBase    : public Clip,
-                         public RenderManager::Job::Listener,
-                         private juce::Timer
+                         public RenderManager::Job::Listener
 {
 public:
     //==============================================================================
@@ -813,7 +812,15 @@ private:
 
     //==============================================================================
     void jobFinished (RenderManager::Job& job, bool completedOk) override;
-    void timerCallback() override;
+    // Lighthouse: the proxy / render poll used to be one juce::Timer per clip. JUCE's Timer::startTimer is O(n) in the
+    // number of live timers, so a tempo change on a project with tens of thousands of clips was quadratic. These now
+    // forward to one shared timer (same repeat-until-stopped semantics as juce::Timer).
+    struct ProxyTimerScheduler;
+    void startTimer (int intervalMs);
+    void stopTimer();
+    bool isTimerRunning() const;
+    void timerCallback();
+    juce::SharedResourcePointer<ProxyTimerScheduler> proxyTimerScheduler;
 
     TimePosition clipTimeToSourceFileTime (TimePosition clipTime);
 

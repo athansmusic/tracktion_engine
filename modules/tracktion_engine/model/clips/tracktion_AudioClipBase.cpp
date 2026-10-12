@@ -203,6 +203,84 @@ private:
 };
 
 //==============================================================================
+// Lighthouse: shared timer for AudioClipBase's proxy / render polling (see the header)
+struct AudioClipBase::ProxyTimerScheduler  : private juce::Timer
+{
+    void start (AudioClipBase& c, int intervalMs)
+    {
+        auto now = juce::Time::getMillisecondCounterHiRes();
+        auto& e = entries[&c];
+        e.interval = juce::jmax (1, intervalMs);
+        e.due = now + e.interval;
+        nextDue = juce::jmin (nextDue, e.due);
+
+        if (! isTimerRunning())
+            startTimer (tickMs);
+    }
+
+    void stop (AudioClipBase& c)
+    {
+        entries.erase (&c);
+
+        if (entries.empty())
+        {
+            nextDue = std::numeric_limits<double>::max();
+            stopTimer();
+        }
+    }
+
+    bool isRunning (const AudioClipBase& c) const
+    {
+        return entries.find (const_cast<AudioClipBase*> (&c)) != entries.end();
+    }
+
+private:
+    struct Entry { double due = 0; int interval = 1; };
+    static constexpr int tickMs = 10;
+
+    void timerCallback() override
+    {
+        auto now = juce::Time::getMillisecondCounterHiRes();
+
+        if (now < nextDue)
+            return;
+
+        std::vector<std::pair<double, AudioClipBase*>> dueClips;
+        nextDue = std::numeric_limits<double>::max();
+
+        for (auto& [clip, e] : entries)
+        {
+            if (e.due <= now)
+            {
+                dueClips.emplace_back (e.due, clip);
+                e.due = now + e.interval; // repeats until the clip stops it, like juce::Timer
+            }
+
+            nextDue = juce::jmin (nextDue, e.due);
+        }
+
+        std::sort (dueClips.begin(), dueClips.end(), [] (auto& a, auto& b) { return a.first < b.first; });
+
+        for (auto& d : dueClips)
+        {
+            // an earlier callback may have destroyed or stopped this clip
+            if (entries.find (d.second) != entries.end())
+                d.second->timerCallback();
+        }
+
+        if (entries.empty())
+            stopTimer();
+    }
+
+    std::unordered_map<AudioClipBase*, Entry> entries;
+    double nextDue = std::numeric_limits<double>::max();
+};
+
+void AudioClipBase::startTimer (int intervalMs)     { proxyTimerScheduler->start (*this, intervalMs); }
+void AudioClipBase::stopTimer()                     { proxyTimerScheduler->stop (*this); }
+bool AudioClipBase::isTimerRunning() const          { return proxyTimerScheduler->isRunning (*this); }
+
+//==============================================================================
 AudioClipBase::AudioClipBase (const juce::ValueTree& v, EditItemID id, Type t, ClipOwner& targetParent)
     : Clip (v, targetParent, id, t),
       loopInfo (edit.engine, state.getOrCreateChildWithName (IDs::LOOPINFO, nullptr), getUndoManager()),
@@ -284,6 +362,7 @@ AudioClipBase::AudioClipBase (const juce::ValueTree& v, EditItemID id, Type t, C
 
 AudioClipBase::~AudioClipBase()
 {
+    stopTimer();
     if (renderJob != nullptr)
         renderJob->removeListener (this);
 }
