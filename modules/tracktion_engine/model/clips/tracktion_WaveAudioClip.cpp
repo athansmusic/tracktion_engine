@@ -249,6 +249,10 @@ int WaveAudioClip::getCurrentTake() const
         auto takesTree = getTakesTree();
         auto pid = sourceFileReference.getSourceProjectItemRef().toString();
 
+        // Apollo patch: with no Project open a file-path source has no ProjectItemRef, so compare the raw strings
+        if (pid.isEmpty())
+            pid = state.getProperty (IDs::source).toString();
+
         for (int i = takesTree.getNumChildren(); --i >= 0;)
         {
             if (takesTree.getChild (i).getProperty (IDs::source) == pid)
@@ -315,7 +319,11 @@ void WaveAudioClip::setCurrentTake (int takeIndex)
     auto mo = edit.engine.getProjectManager().getProjectItem (takeSourceRef);
     invalidateCurrentTake();
 
-    if (mo != nullptr || getCompManager().isTakeComp (takeIndex))
+    // Apollo patch: a take that is a plain file path (no Project open) is as good as a project item
+    const bool isFileTake = mo == nullptr && ! takeSourceRef.isProjectItemID()
+                             && SourceFileReference::findFileFromString (edit, takeSourceRef.toString()).existsAsFile();
+
+    if (mo != nullptr || isFileTake || getCompManager().isTakeComp (takeIndex))
         sourceFileReference.setToProjectFileReference (takeSourceRef);
     else
         takesTree.removeChild (take, getUndoManager());
@@ -344,6 +352,8 @@ juce::StringArray WaveAudioClip::getTakeDescriptions() const
         {
             if (auto projectItem = edit.engine.getProjectManager().getProjectItem (takes.getReference (i)))
                 s.add (juce::String (i + 1) + ". " + projectItem->getName());
+            else if (auto f = SourceFileReference::findFileFromString (edit, takes.getReference (i).toString()); f.existsAsFile())
+                s.add (juce::String (i + 1) + ". " + f.getFileNameWithoutExtension());   // Apollo patch: file-path takes
             else
                 s.add (juce::String (i + 1) + ". <" + TRANS("Deleted") + ">");
 

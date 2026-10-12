@@ -628,9 +628,10 @@ void CompFactory::removeComp (CompManager& cm)
 //==============================================================================
 struct WaveCompManager::CompRenderContext
 {
-    CompRenderContext (Engine& e, const juce::Array<ProjectItemRef> takesRefs_, const juce::ValueTree& takeTree_, int activeTakeIndex_,
+    CompRenderContext (Engine& e, const juce::Array<ProjectItemRef> takesRefs_, const juce::Array<juce::File> takeFiles_,
+                       const juce::ValueTree& takeTree_, int activeTakeIndex_,
                        double sourceTimeMultiplier_, double offset_, double maxLength_, double xFade)
-        : engine (e), takesRefs (takesRefs_), takeTree (takeTree_.createCopy()),
+        : engine (e), takesRefs (takesRefs_), takeFiles (takeFiles_), takeTree (takeTree_.createCopy()),
           activeTakeIndex (activeTakeIndex_),
           sourceTimeMultiplier (sourceTimeMultiplier_), offset (offset_), maxLength (maxLength_), crossfadeLength (xFade)
     {
@@ -638,6 +639,7 @@ struct WaveCompManager::CompRenderContext
 
     Engine& engine;
     juce::Array<ProjectItemRef> takesRefs;
+    juce::Array<juce::File> takeFiles;   // Apollo patch: resolved on the message thread
     const juce::ValueTree takeTree;
     const int activeTakeIndex;
     const double sourceTimeMultiplier, offset, maxLength, crossfadeLength;
@@ -958,7 +960,14 @@ ProjectItemRef WaveCompManager::getProjectItemRefForTake (int takeIndex) const
 AudioFile WaveCompManager::getSourceFileForTake (int takeIndex) const
 {
     auto& e = clip.edit.engine;
-    return AudioFile (e, e.getProjectManager().findSourceFile (getProjectItemRefForTake (takeIndex)));
+    auto ref = getProjectItemRefForTake (takeIndex);
+    auto f = e.getProjectManager().findSourceFile (ref);
+
+    // Apollo patch: takes that are plain file paths (no Project open)
+    if (f == juce::File() && ref.isValid() && ! ref.isProjectItemID())
+        f = SourceFileReference::findFileFromString (clip.edit, ref.toString());
+
+    return AudioFile (e, f);
 }
 
 juce::File WaveCompManager::getDefaultTakeFile (int takeIndex) const
@@ -1071,7 +1080,12 @@ WaveCompManager::CompRenderContext* WaveCompManager::createRenderContext() const
 {
     const double xFadeMs = clip.edit.engine.getPropertyStorage().getProperty (SettingID::compCrossfadeMs, 20.0);
 
-    return new CompRenderContext (clip.edit.engine, clip.getTakes(), getActiveTakeTree(), getActiveTakeIndex(),
+    juce::Array<juce::File> files;
+
+    for (int i = 0; i < clip.getTakes().size(); ++i)
+        files.add (getSourceFileForTake (i).getFile());
+
+    return new CompRenderContext (clip.edit.engine, clip.getTakes(), files, getActiveTakeTree(), getActiveTakeIndex(),
                                   getSourceTimeMultiplier(), getOffset(), getMaxCompLength(), xFadeMs / 1000.0);
 }
 
@@ -1110,7 +1124,7 @@ bool WaveCompManager::renderTake (CompRenderContext& context, Edit& edit, AudioF
             const auto takeRef = context.takesRefs[takeIndex];
             jassert (takeRef.isValid());
 
-            auto takeFile = AudioFile (context.engine, context.engine.getProjectManager().findSourceFile (takeRef));
+            auto takeFile = AudioFile (context.engine, context.takeFiles[takeIndex]);
 
             auto node = tracktion::graph::makeNode<WaveNode> (takeFile, totalRange, TimeDuration(), TimeRange(), LiveClipLevel(), 1.0,
                                                               ChannelConfiguration::discreteChannels (takeFile.getInfo().numChannels),
@@ -1253,9 +1267,9 @@ private:
         // just use the first existing take as the basis for the comp render
         juce::File takeFile;
 
-        for (auto& takeRef : context->takesRefs)
+        for (auto& f : context->takeFiles)
         {
-            takeFile = engine.getProjectManager().findSourceFile (takeRef);
+            takeFile = f;
 
             if (takeFile.existsAsFile())
                 break;
