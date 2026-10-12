@@ -47,8 +47,30 @@ struct AudioFadeCurve
         linear  = 1,
         convex  = 2,
         concave = 3,
-        sCurve  = 4
+        sCurve  = 4,
+
+        // Apollo: smooth curves. curveMid + n, n = -100 (slowest) .. +100 (fastest), 0 = linear
+        curveMin = 900,
+        curveMid = 1000,
+        curveMax = 1100
     };
+
+    /** Apollo: true for the smooth curve range. */
+    static bool isSmooth (Type t) noexcept                  { return (int) t >= (int) curveMin && (int) t <= (int) curveMax; }
+
+    /** Apollo: the bend of a smooth curve, -1 (slow start) .. +1 (fast start). */
+    static float smoothBend (Type t) noexcept               { return juce::jlimit (-1.0f, 1.0f, ((int) t - (int) curveMid) / 100.0f); }
+
+    /** Apollo: a smooth curve for a bend of -1 .. +1. */
+    static Type smoothType (float bend) noexcept            { return (Type) ((int) curveMid + juce::roundToInt (juce::jlimit (-1.0f, 1.0f, bend) * 100.0f)); }
+
+    /** Apollo: gain of a smooth curve: +bend rises fast (like convex), -bend slow (like concave), 0 straight. */
+    static float smoothGain (float bend, float alpha) noexcept
+    {
+        alpha = juce::jlimit (0.0f, 1.0f, alpha);
+        auto power = 1.0f + 4.0f * std::abs (bend);
+        return bend >= 0.0f ? 1.0f - std::pow (1.0f - alpha, power) : std::pow (alpha, power);
+    }
 
     /** Converts an alpha position along the curve (0 to 1.0) into the gain at that point. */
     template <typename CurveClass>
@@ -64,6 +86,7 @@ struct AudioFadeCurve
         if (type == convex)    return alphaToGain<Convex>  (alpha);
         if (type == concave)   return alphaToGain<Concave> (alpha);
         if (type == sCurve)    return alphaToGain<SCurve>  (alpha);
+        if (isSmooth (type))   return smoothGain (smoothBend (type), alpha);
 
         jassert (type == linear);
         return alpha;
@@ -107,7 +130,27 @@ struct AudioFadeCurve
             case convex:    renderBlock<Convex>  (dest, numSamples, startAlpha, endAlpha); break;
             case concave:   renderBlock<Concave> (dest, numSamples, startAlpha, endAlpha); break;
             case sCurve:    renderBlock<SCurve>  (dest, numSamples, startAlpha, endAlpha); break;
-            default:        jassertfalse; break;
+            default:
+            {
+                if (! isSmooth (type))
+                {
+                    jassertfalse;
+                    break;
+                }
+
+                // Apollo: smooth curve, sample by sample
+                auto bend = smoothBend (type);
+                const double delta = (endAlpha - startAlpha) / (double) numSamples;
+                double alpha = startAlpha;
+
+                while (--numSamples >= 0)
+                {
+                    dest.apply (smoothGain (bend, (float) alpha));
+                    alpha += delta;
+                }
+
+                break;
+            }
         }
     }
 
