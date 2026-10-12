@@ -108,8 +108,13 @@ public:
     /** This will increase/decrease playback speed by resampling, pitching the output up or down. */
     void setSpeedCompensation (double plusOrMinus);
 
-    /** This will increase/decrease playback speed by changing the tempo, maintaining pitch where possible. */
+    /** This will increase/decrease playback speed by changing the tempo, maintaining pitch where possible.
+        The proportion is clamped to minTempoAdjustment .. maxTempoAdjustment (0.5x .. 2x playback).
+    */
     void setTempoAdjustment (double plusOrMinusProportion);
+
+    /** Lighthouse: the range setTempoAdjustment accepts (was -0.5 .. +0.5 upstream; +1.0 = double speed). */
+    static constexpr double minTempoAdjustment = -0.5, maxTempoAdjustment = 1.0;
 
     /** Posts a transport position change.
         Using the second parameter it's possible to delay position changes in order to quantise them to some musical sense.

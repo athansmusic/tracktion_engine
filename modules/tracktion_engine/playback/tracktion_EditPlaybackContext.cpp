@@ -287,7 +287,7 @@ struct EditPlaybackContext::NodePlaybackContext
 
     void setTempoAdjustment (double plusOrMinusProportion)
     {
-        blockLengthScaleFactor = 1.0 + std::clamp (plusOrMinusProportion, -0.5, 0.5);
+        blockLengthScaleFactor = 1.0 + std::clamp (plusOrMinusProportion, EditPlaybackContext::minTempoAdjustment, EditPlaybackContext::maxTempoAdjustment);
     }
 
     void checkForTempoSequenceChanges()
