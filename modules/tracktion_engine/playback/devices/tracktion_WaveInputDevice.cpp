@@ -1078,22 +1078,21 @@ public:
                 }
             }
 
+            // Apollo: edits without a Project (file-based) are supported; the clip references the file directly
             auto proj = getProjectForEdit (edit);
+            ProjectItem::Ptr projectItem;
 
-            if (proj == nullptr)
+            if (proj != nullptr)
             {
-                jassertfalse; // TODO
-                return nullptr;
+                projectItem = proj->createNewItem (recordedFile, ProjectItem::waveItemType(),
+                                                   recordedFile.getFileNameWithoutExtension(),
+                                                   {}, ProjectItem::Category::recorded, true);
+
+                if (projectItem == nullptr)
+                    continue;
+
+                jassert (projectItem->getProjectItemRef().isValid());
             }
-
-            auto projectItem = proj->createNewItem (recordedFile, ProjectItem::waveItemType(),
-                                                    recordedFile.getFileNameWithoutExtension(),
-                                                    {}, ProjectItem::Category::recorded, true);
-
-            if (projectItem == nullptr)
-                continue;
-
-            jassert (projectItem->getProjectItemRef().isValid());
 
             auto clipName = getNameForNewClip (*dstTrack);
             TimePosition start;
@@ -1140,7 +1139,8 @@ public:
                 clipPos.time = clipPos.time.withStart (0s);
             }
 
-            auto newClip = dstTrack->insertWaveClip (clipName, projectItem->getProjectItemRef(), clipPos, false);
+            auto newClip = projectItem != nullptr ? dstTrack->insertWaveClip (clipName, projectItem->getProjectItemRef(), clipPos, false)
+                                                  : dstTrack->insertWaveClip (clipName, recordedFile, clipPos, false);
 
             if (newClip == nullptr)
                 continue;
