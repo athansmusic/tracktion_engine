@@ -82,6 +82,14 @@ struct PluginScanMasterProcess  : private juce::ChildProcessCoordinator
                     return false;
                 }
 
+                if (elapsed.inMilliseconds() > (double) engine.getPluginManager().pluginScanTimeoutMs)
+                {
+                    TRACKTION_LOG_ERROR ("Plugin stopped responding:  " + fileOrIdentifier);
+                    hung = true;
+                    crashed = true;
+                    return false;
+                }
+
                 if (scanner.shouldAbortScan() || ! launched)
                 {
                     TRACKTION_LOG ("Plugin scan cancelled");
@@ -119,6 +127,12 @@ struct PluginScanMasterProcess  : private juce::ChildProcessCoordinator
 
     void handleMessage (const juce::XmlElement& xml)
     {
+        if (xml.hasTagName ("CRASHED"))
+        {
+            crashed = true;
+            return;
+        }
+
         if (xml.hasTagName ("FOUND"))
         {
             const juce::ScopedLock sl (replyLock);
@@ -131,7 +145,7 @@ struct PluginScanMasterProcess  : private juce::ChildProcessCoordinator
         crashed = true;
     }
 
-    volatile bool launched = false, crashed = false;
+    volatile bool launched = false, crashed = false, hung = false;
 
 private:
     Engine& engine;
@@ -189,6 +203,19 @@ struct PluginScanChildProcess  : public juce::ChildProcessWorker,
 
     void handleScanMessage (int requestID, const juce::String& formatName, const juce::String& fileOrIdentifier)
     {
+       #if JUCE_DEBUG
+        // Dev only: LIGHTHOUSE_SIM_SCAN="name:crash,other:hang" makes scanning a file whose path contains that text crash or hang
+        // this child process (docs/PLUGIN-SAFETY.md, test 112)
+        for (auto& rule : juce::StringArray::fromTokens (juce::SystemStats::getEnvironmentVariable ("LIGHTHOUSE_SIM_SCAN", {}), ",", ""))
+            if (rule.contains (":") && fileOrIdentifier.containsIgnoreCase (rule.upToLastOccurrenceOf (":", false, false)))
+            {
+                if (rule.fromLastOccurrenceOf (":", false, false) == "hang")
+                    for (;;) juce::Thread::sleep (1000);
+
+                *static_cast<volatile int*> (nullptr) = 1;
+            }
+       #endif
+
         juce::XmlElement result ("FOUND");
         result.setAttribute ("id", requestID);
 
@@ -232,6 +259,31 @@ private:
         }
     }
 
+   #if JUCE_WINDOWS
+    /** Ends this child at once. Process::terminate() goes through ExitProcess, which can sit waiting for threads of a crashed plugin
+        (the parent then only notices when its timeout kills us); TerminateProcess closes the pipe immediately, so the crash is seen at once. */
+    void crashExit()
+    {
+        // the parent only notices a dead pipe slowly on Windows: say so ourselves, then go
+        juce::XmlElement crashedMessage ("CRASHED");
+        sendMessageToCoordinator (createScanMessage (crashedMessage));
+        hardExit();
+    }
+
+    static void hardExit()
+    {
+        using Term = int (__stdcall*) (void*, unsigned int);
+        using Cur = void* (__stdcall*) ();
+        juce::DynamicLibrary k32 ("kernel32.dll");
+
+        if (auto t = (Term) k32.getFunction ("TerminateProcess"))
+            if (auto c = (Cur) k32.getFunction ("GetCurrentProcess"))
+                t (c(), 1);
+
+        juce::Process::terminate();
+    }
+   #endif
+
     void handleMessageSafely (const juce::XmlElement& m)
     {
        #if JUCE_WINDOWS
@@ -245,7 +297,7 @@ private:
         }
         __except (1)
         {
-            juce::Process::terminate();
+            crashExit();
         }
        #endif
     }
@@ -314,18 +366,31 @@ struct CustomScanner  : public juce::KnownPluginList::CustomScanner
                     if (masterProcess->waitForReply (requestID, fileOrIdentifier, result, *this))
                         return true;
 
+                    bool wasHung = masterProcess != nullptr && masterProcess->hung;
+
                     // if there's a crash, give it a second chance with a fresh child process,
-                    // in case the real culprit was whatever plugin preceded this one.
-                    if (masterProcess != nullptr && masterProcess->crashed && ! shouldAbortScan())
+                    // in case the real culprit was whatever plugin preceded this one. (A plugin that hung is not tried again.)
+                    if (masterProcess != nullptr && masterProcess->crashed && ! wasHung && ! shouldAbortScan())
                     {
                         masterProcess.reset();
                         masterProcess = std::make_unique<PluginScanMasterProcess> (engine);
 
-                        return masterProcess->ensureChildProcessLaunched()
-                                 && ! shouldAbortScan()
-                                 && masterProcess->sendScanRequest (format, fileOrIdentifier, requestID)
-                                 && ! shouldAbortScan()
-                                 && masterProcess->waitForReply (requestID, fileOrIdentifier, result, *this);
+                        if (masterProcess->ensureChildProcessLaunched()
+                             && ! shouldAbortScan()
+                             && masterProcess->sendScanRequest (format, fileOrIdentifier, requestID)
+                             && ! shouldAbortScan()
+                             && masterProcess->waitForReply (requestID, fileOrIdentifier, result, *this))
+                            return true;
+
+                        wasHung = masterProcess != nullptr && masterProcess->hung;
+                    }
+
+                    if (! shouldAbortScan())
+                    {
+                        masterProcess.reset();      // (kills a hung child)
+
+                        if (auto cb = engine.getPluginManager().pluginScanFailed)
+                            cb (fileOrIdentifier, format.getName(), wasHung);
                     }
                 }
 

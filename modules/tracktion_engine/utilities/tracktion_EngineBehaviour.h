@@ -67,6 +67,12 @@ public:
     /// or examining. Override this if you always need a plugin loaded
     virtual bool shouldLoadPlugin (ExternalPlugin&);
 
+    /// Lighthouse plugin safety: called just before an ExternalPlugin starts creating its instance and again when it has
+    /// finished (restoring its state included). A host can write a marker file in between, so a plugin that kills the
+    /// process while loading is known the next time the app starts.
+    virtual void pluginLoadStarted (const juce::PluginDescription&)                 {}
+    virtual void pluginLoadFinished (const juce::PluginDescription&)                {}
+
     /// Gives plugins an opportunity to save custom data when the plugin state gets flushed.
     virtual void saveCustomPluginProperties (juce::ValueTree&, juce::AudioPluginInstance&, juce::UndoManager*)  {}
 

@@ -108,6 +108,13 @@ public:
     // this can be set to provide a function that gets called when a scan finishes
     std::function<void()> scanCompletedCallback;
 
+    /// Lighthouse plugin safety: a plugin that crashed (or stopped answering) the scanning child process is reported here
+    /// (on the scanning thread) just before KnownPluginList blacklists it. `hung` is true if it timed out rather than crashed.
+    std::function<void (const juce::String& fileOrIdentifier, const juce::String& formatName, bool hung)> pluginScanFailed;
+
+    /// How long the scanning child process may take over one plugin file before it is killed and the plugin is treated as failed.
+    int pluginScanTimeoutMs = 90 * 1000;
+
 private:
     Engine& engine;
 

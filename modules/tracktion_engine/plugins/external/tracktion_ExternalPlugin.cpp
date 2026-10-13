@@ -1863,6 +1863,9 @@ void ExternalPlugin::startPluginInstanceCreation (const juce::PluginDescription&
 
     auto& dm = engine.getDeviceManager();
 
+    // Lighthouse plugin safety: bracket the whole creation (instantiate + restoring state) so a host can leave a marker
+    engine.getEngineBehaviour().pluginLoadStarted (description);
+
     if (requiresAsyncInstantiation (engine, description))
     {
         isAsyncInitialising = true;
@@ -1870,7 +1873,7 @@ void ExternalPlugin::startPluginInstanceCreation (const juce::PluginDescription&
         // The plugin might be deleted before the instance is created so use a weak-ref
         engine.getPluginManager().pluginFormatManager
             .createPluginInstanceAsync (description, dm.getSampleRate(), dm.getBlockSize(),
-                                        [ep = makeSafeRef (*this)]
+                                        [ep = makeSafeRef (*this), description]
                                         (auto instance, auto err)
                                         {
                                             if (! ep)
@@ -1878,6 +1881,7 @@ void ExternalPlugin::startPluginInstanceCreation (const juce::PluginDescription&
 
                                             ep->loadError = err;
                                             ep->completePluginInstanceCreation (std::move (instance));
+                                            ep->engine.getEngineBehaviour().pluginLoadFinished (description);
 
                                             // Trigger any status messages to be updated
                                             ep->changed();
@@ -1898,6 +1902,8 @@ void ExternalPlugin::startPluginInstanceCreation (const juce::PluginDescription&
         {
             completePluginInstanceCreation (std::move (newInstance));
         }
+
+        engine.getEngineBehaviour().pluginLoadFinished (description);
     }
 }
 
