@@ -123,6 +123,10 @@ Plugin::Plugin (PluginCreationInfo info)
     }
    #endif
 
+    if (state.hasProperty (juce::Identifier (getSlotMixParameterID()))
+         || state.getChildWithProperty (IDs::paramID, getSlotMixParameterID()).isValid())
+        enableSlotMix();
+
     if (state.hasProperty (IDs::windowX))
         windowState->lastWindowBounds = juce::Rectangle<int> (state[IDs::windowX],
                                                               state[IDs::windowY], 1, 1);
@@ -556,6 +560,8 @@ void Plugin::baseClassInitialise (const PluginInitialisationInfo& info)
         CRASH_TRACER
         reset();
     }
+
+    prepareSlotMix();
 }
 
 void Plugin::baseClassDeinitialise()
@@ -635,6 +641,147 @@ PluginList* Plugin::getOwnerList() const
 }
 
 //==============================================================================
+//==============================================================================
+// Slot mix (Lighthouse)
+struct Plugin::SlotMixDsp
+{
+    static constexpr int ringSize = 1 << 16;    // about 1.3 s at 48 kHz: the longest latency we can align
+    static constexpr int maxChannels = 2;       // channels beyond these pass through wet
+
+    juce::AudioBuffer<float> ring { maxChannels, ringSize };
+    juce::AudioBuffer<float> dry;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoother { 1.0f };
+    double rate = 0.0;
+    int writePos = 0;
+    std::atomic<bool> ready { false };
+};
+
+AutomatableParameter* Plugin::enableSlotMix()
+{
+    TRACKTION_ASSERT_MESSAGE_THREAD
+
+    if (slotMixParam != nullptr)
+        return slotMixParam.get();
+
+    slotMixValue.referTo (state, juce::Identifier (getSlotMixParameterID()), getUndoManager(), 1.0f);
+
+    AutomatableParameter::Ptr p (new AutomatableParameter (getSlotMixParameterID(), TRANS("Mix"), *this, { 0.0f, 1.0f }));
+    p->attachToCurrentValue (slotMixValue);
+    p->valueToStringFunction = [] (float v) { return juce::String (juce::roundToInt (v * 100.0f)) + " %"; };
+    p->stringToValueFunction = [] (const juce::String& t)
+    {
+        return juce::jlimit (0.0f, 1.0f, (float) t.retainCharacters ("0123456789.,-+e").replaceCharacter (',', '.').getDoubleValue() * 0.01f);
+    };
+
+    slotMixParam = p;
+    addAutomatableParameter (p);
+    slotMixDsp = std::make_unique<SlotMixDsp>();
+
+    if (! baseClassNeedsInitialising())
+        prepareSlotMix();
+
+    return slotMixParam.get();
+}
+
+void Plugin::readdSlotMixParameter()
+{
+    if (slotMixParam != nullptr)
+        addAutomatableParameter (slotMixParam);
+}
+
+void Plugin::prepareSlotMix()
+{
+    if (slotMixDsp == nullptr || slotMixParam == nullptr)
+        return;
+
+    auto& d = *slotMixDsp;
+    d.ready = false;
+
+    if (d.rate != sampleRate || d.dry.getNumSamples() < blockSizeSamples)
+    {
+        d.rate = sampleRate;
+        d.dry.setSize (SlotMixDsp::maxChannels, juce::jmax (512, blockSizeSamples));
+        d.ring.clear();
+        d.writePos = 0;
+        d.smoother.reset (sampleRate, 0.02);
+    }
+
+    d.smoother.setCurrentAndTargetValue (juce::jlimit (0.0f, 1.0f, slotMixParam->getCurrentValue()));
+    d.ready = true;
+}
+
+void Plugin::applyWithSlotMix (const PluginRenderContext& pc)
+{
+    auto* dsp = slotMixDsp.get();
+    auto* buf = pc.destBuffer;
+
+    if (dsp == nullptr || ! dsp->ready || slotMixParam == nullptr || buf == nullptr
+         || pc.bufferNumSamples > dsp->dry.getNumSamples() || buf->getNumChannels() == 0)
+    {
+        applyToBuffer (pc);
+        return;
+    }
+
+    auto& d = *dsp;
+    const int start = pc.bufferStartSample;
+    const int n = pc.bufferNumSamples;
+    const int chans = juce::jmin (buf->getNumChannels(), SlotMixDsp::maxChannels);
+    const int latency = juce::jlimit (0, SlotMixDsp::ringSize - d.dry.getNumSamples() - 1,
+                                      juce::roundToInt (getLatencySeconds() * sampleRate));
+
+    d.smoother.setTargetValue (juce::jlimit (0.0f, 1.0f, slotMixParam->getCurrentValue()));
+    const bool mixing = d.smoother.getTargetValue() < 0.9999f || d.smoother.isSmoothing();
+
+    if (! mixing && latency == 0)
+    {
+        applyToBuffer (pc);
+        return;
+    }
+
+    // The dry path: the input delayed by the latency. The ring is kept current whenever there is latency,
+    // so a mix change starts from real history rather than silence.
+    constexpr int mask = SlotMixDsp::ringSize - 1;
+
+    for (int c = 0; c < chans; ++c)
+    {
+        auto* in = buf->getReadPointer (c, start);
+        auto* ring = d.ring.getWritePointer (c);
+        auto* dry = d.dry.getWritePointer (c);
+        auto w = d.writePos;
+
+        for (int i = 0; i < n; ++i)
+        {
+            ring[w] = in[i];
+            dry[i] = latency == 0 ? in[i] : ring[(w - latency) & mask];
+            w = (w + 1) & mask;
+        }
+    }
+
+    d.writePos = (d.writePos + n) & mask;
+
+    applyToBuffer (pc);
+
+    if (! mixing)
+        return;
+
+    const int outChans = juce::jmin (buf->getNumChannels(), chans);
+
+    for (int i = 0; i < n; ++i)
+    {
+        const auto m = d.smoother.getNextValue();
+
+        if (m >= 1.0f)
+            continue;
+
+        for (int c = 0; c < outChans; ++c)
+        {
+            auto* o = buf->getWritePointer (c, start);
+            const auto dv = d.dry.getReadPointer (c)[i];
+            o[i] = m <= 0.0f ? dv : dv + (o[i] - dv) * m;
+        }
+    }
+}
+
 AutomatableParameter* Plugin::addParam (const juce::String& paramID, const juce::String& name,
                                         juce::NormalisableRange<float> valueRange)
 {
@@ -748,19 +895,19 @@ void Plugin::applyToBufferWithAutomation (const PluginRenderContext& pc)
             updateParameterStreams (tc.isPlayContextActive() && ! pc.isRendering
                                         ? tc.getPosition()
                                         : pc.editTime.getStart());
-            applyToBuffer (pc);
+            applyWithSlotMix (pc);
         }
         else
         {
             SCOPED_REALTIME_CHECK
             updateParameterStreams (pc.editTime.getStart());
-            applyToBuffer (pc);
+            applyWithSlotMix (pc);
         }
     }
     else
     {
         SCOPED_REALTIME_CHECK
-        applyToBuffer (pc);
+        applyWithSlotMix (pc);
     }
 }
 

@@ -376,6 +376,23 @@ public:
                                     std::function<float(const juce::String&)> stringToValueFunction);
 
     //==============================================================================
+    // Slot mix (Lighthouse)
+    //
+    // A dry/wet control for ANY plugin, applied around applyToBuffer() by applyToBufferWithAutomation().
+    // The dry path is the plugin's input delayed by getLatencySeconds(), so the two stay in time.
+    // The value (0 = dry, 1 = wet, default 1) is smoothed, saved in the plugin state (property "slotMix")
+    // and automatable (parameter ID "slotMix"). It is off until enableSlotMix() is called (or the saved
+    // state already has a value or an automation curve for it), so plugins that don't want it pay nothing.
+
+    static juce::String getSlotMixParameterID()               { return "slotMix"; }
+
+    /** The slot mix parameter, or nullptr if it hasn't been enabled. */
+    AutomatableParameter* getSlotMixParameter() const noexcept { return slotMixParam.get(); }
+
+    /** Adds the slot mix parameter (message thread). Returns the existing one if already enabled. */
+    AutomatableParameter* enableSlotMix();
+
+    //==============================================================================
     // Sidechain routing
 
     /** Returns the names of this plugin's input channels (convenience wrapper around getChannelNames). */
@@ -641,8 +658,18 @@ protected:
     static void getLeftRightChannelNames (juce::StringArray* ins, juce::StringArray* outs);
     static void getLeftRightChannelNames (juce::StringArray* chans);
 
+    /** Subclasses that rebuild their parameter list (clearParameterList()) call this afterwards to put the slot mix back. */
+    void readdSlotMixParameter();
+
 private:
     mutable AutomatableParameter::Ptr quickControlParameter;
+
+    AutomatableParameter::Ptr slotMixParam;
+    juce::CachedValue<float> slotMixValue;
+    struct SlotMixDsp;
+    std::unique_ptr<SlotMixDsp> slotMixDsp;
+    void prepareSlotMix();
+    void applyWithSlotMix (const PluginRenderContext&);
 
     std::atomic<int> initialiseCount { 0 };
     double timeToCpuScale = 0;

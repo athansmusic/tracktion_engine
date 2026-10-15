@@ -768,6 +768,7 @@ void ExternalPlugin::buildParameterList()
 
     addAutomatableParameter (dryGain);
     addAutomatableParameter (wetGain);
+    readdSlotMixParameter();
 
     if (auto pi = getAudioPluginInstance())
     {
@@ -970,6 +971,7 @@ void ExternalPlugin::processingChanged()
     else
     {
         clearParameterList();
+        readdSlotMixParameter();
         autoParamForParamNumbers.clear();
         getParameterTree().clear();
 
