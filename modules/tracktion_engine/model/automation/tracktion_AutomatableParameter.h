@@ -247,6 +247,9 @@ public:
     void startRecordingStatus();
 
 protected:
+    /** Lighthouse: works out what the attached property gets, leaving out live-only sources. */
+    void updatePersistentValue (float persistBase, float persistMod);
+
     struct AttachedValue;
     struct AttachedFloatValue;
     struct AttachedIntValue;
@@ -260,6 +263,10 @@ protected:
     MacroParameterList* macroOwner = nullptr;
     std::unique_ptr<AutomationCurveSource> curveSource;
     std::atomic<float> currentValue { 0.0f }, currentParameterValue { 0.0f },  currentBaseValue { 0.0f }, currentModifierValue { 0.0f };
+    // Lighthouse: what an attached property (a track fader's saved volume) gets. It follows currentValue
+    // except that live-only sources (clip envelopes) never reach it. persistentModifierValue is the
+    // part of currentModifierValue that does reach it.
+    std::atomic<float> persistentValue { 0.0f }, persistentModifierValue { 0.0f };
     mutable std::atomic<int> numActiveAutomationSources { 0 };
     std::atomic<bool> isRecording { false };
     bool updateParametersRecursionCheck = false;

@@ -96,6 +96,12 @@ struct AutomationSource  : public juce::ReferenceCountedObject
     /** Should return the current value of the source. */
     virtual float getCurrentValue() = 0;
 
+    /** Lighthouse: true for sources that only shape the live value (clip envelopes).
+        They are never written to the parameter's saved property, so the saved value
+        (a track fader, say) stays what the user set.
+    */
+    virtual bool isLiveOnly() const         { return false; }
+
     /** Is called by the message thread to modify the automation value.
         By default, most modifier types just add to the modValue but some types
         can overwrite the base or scale the mod etc.
@@ -511,6 +517,8 @@ public:
         return &curveModifier;
     }
 
+    bool isLiveOnly() const override        { return true; }
+
     AutomationCurveModifier& curveModifier;
     AutomatableParameter& parameter;
 
@@ -896,7 +904,7 @@ struct AutomatableParameter::AttachedFloatValue : public AutomatableParameter::A
         parameter.setParameter (value, juce::dontSendNotification);
     }
 
-    void handleAsyncUpdate() override               { value.setValue (parameter.currentValue, nullptr); }
+    void handleAsyncUpdate() override               { value.setValue (parameter.persistentValue, nullptr); }
     float getValue() override                       { return value; }
     void setValue (float v) override                { value = v; }
     float getDefault() override                     { return value.getDefault(); }
@@ -928,7 +936,7 @@ struct AutomatableParameter::AttachedIntValue : public AutomatableParameter::Att
         parameter.setParameter ((float) value.get(), juce::dontSendNotification);
     }
 
-    void handleAsyncUpdate() override               { value.setValue (juce::roundToInt (parameter.getCurrentValue()), nullptr); }
+    void handleAsyncUpdate() override               { value.setValue (juce::roundToInt (parameter.persistentValue.load()), nullptr); }
     float getValue() override                       { return (float) value.get(); }
     void setValue (float v) override                { value = juce::roundToInt (v); }
     float getDefault() override                     { return (float) value.getDefault(); }
@@ -960,7 +968,7 @@ struct AutomatableParameter::AttachedBoolValue : public AutomatableParameter::At
         parameter.setParameter (value.get() ? 1.0f : 0.0f, juce::dontSendNotification);
     }
 
-    void handleAsyncUpdate() override                     { value.setValue (parameter.currentValue != 0.0f, nullptr); }
+    void handleAsyncUpdate() override                     { value.setValue (parameter.persistentValue != 0.0f, nullptr); }
     float getValue() override                             { return value; }
     void setValue (float v) override                      { value = v != 0 ? true : false; }
     float getDefault() override                           { return value.getDefault() ? 1.0f : 0.0f; }
@@ -1209,14 +1217,23 @@ void AutomatableParameter::updateFromAutomationSources (TimePosition time)
                              return currentParameterValue.load();
                          }();
 
+    float persistBase = newBaseValue, persistMod = 0.0f;
+
     getAutomationSourceList()
-        .visitSources ([&newBaseValue, &newModifierValue, time] (AutomationSource& m) mutable
+        .visitSources ([&] (AutomationSource& m) mutable
                        {
                            m.setPosition (time);
 
                            if (m.isEnabled())
+                           {
                                m.processValue (newBaseValue, newModifierValue);
+
+                               if (! m.isLiveOnly())
+                                   m.processValue (persistBase, persistMod);
+                           }
                        });
+
+    updatePersistentValue (persistBase, persistMod);
 
     if (newModifierValue != 0.0f)
     {
@@ -1285,7 +1302,7 @@ void AutomatableParameter::valueTreeRedirected (juce::ValueTree&)    { jassertfa
 //==============================================================================
 void AutomatableParameter::attachToCurrentValue (juce::CachedValue<float>& v)
 {
-    currentParameterValue = currentValue = v;
+    persistentValue = currentParameterValue = currentValue = v;
     jassert (attachedValue == nullptr);
     attachedValue = std::make_unique<AttachedFloatValue> (*this, v);
     v.getValueTree().addListener (this);
@@ -1293,7 +1310,7 @@ void AutomatableParameter::attachToCurrentValue (juce::CachedValue<float>& v)
 
 void AutomatableParameter::attachToCurrentValue (juce::CachedValue<int>& v)
 {
-    currentParameterValue = currentValue = (float) v.get();
+    persistentValue = currentParameterValue = currentValue = (float) v.get();
     jassert (attachedValue == nullptr);
     attachedValue = std::make_unique<AttachedIntValue> (*this, v);
     v.getValueTree().addListener (this);
@@ -1301,7 +1318,7 @@ void AutomatableParameter::attachToCurrentValue (juce::CachedValue<int>& v)
 
 void AutomatableParameter::attachToCurrentValue (juce::CachedValue<bool>& v)
 {
-    currentParameterValue = currentValue = v;
+    persistentValue = currentParameterValue = currentValue = v;
     jassert (attachedValue == nullptr);
     attachedValue = std::make_unique<AttachedBoolValue> (*this, v);
     v.getValueTree().addListener (this);
@@ -1404,6 +1421,11 @@ void AutomatableParameter::setParameterValue (float value, bool isFollowingCurve
     value = snapToState (getValueRange().clipValue (value));
     currentBaseValue = value;
 
+    // Lighthouse: a value the user sets also keeps its saved-property share of the modifiers
+    // only (clip envelopes are left out). A curve-following update sets persistentValue itself.
+    if (! isFollowingCurve)
+        persistentValue = snapToState (getValueRange().clipValue (value + persistentModifierValue.load()));
+
     if (currentModifierValue != 0.0f)
         value = snapToState (getValueRange().clipValue (value + currentModifierValue));
 
@@ -1462,7 +1484,7 @@ void AutomatableParameter::setParameterValue (float value, bool isFollowingCurve
             if (attachedValue != nullptr)
             {
                 attachedValue->cancelPendingUpdate();
-                attachedValue->setValue (value);
+                attachedValue->setValue (persistentValue);
             }
         }
 
@@ -1540,6 +1562,20 @@ AutomatableParameter::AutomationSourceList& AutomatableParameter::getAutomationS
     return *automationSourceList;
 }
 
+void AutomatableParameter::updatePersistentValue (float persistBase, float persistMod)
+{
+    float mod = 0.0f;
+
+    if (persistMod != 0.0f)
+    {
+        auto normalisedBase = valueRange.convertTo0to1 (persistBase);
+        mod = valueRange.convertFrom0to1 (juce::jlimit (0.0f, 1.0f, normalisedBase + persistMod)) - persistBase;
+    }
+
+    persistentModifierValue = mod;
+    persistentValue = snapToState (getValueRange().clipValue (persistBase + mod));
+}
+
 void AutomatableParameter::updateToFollowCurve (TimePosition time)
 {
     TRACKTION_ASSERT_MESSAGE_THREAD
@@ -1552,15 +1588,22 @@ void AutomatableParameter::updateToFollowCurve (TimePosition time)
                              return currentParameterValue.load();
                          }();
 
+    float persistBase = newBaseValue, persistMod = 0.0f;
+
     getAutomationSourceList()
-        .visitSources ([&newBaseValue, &newModifierValue, time] (AutomationModifierSource& m) mutable
+        .visitSources ([&] (AutomationModifierSource& m) mutable
                        {
                            if (! m.isEnabledAt (time))
                                return;
 
                            m.processValueAt (time, newBaseValue, newModifierValue);
                            jassert (! std::isnan (newModifierValue));
+
+                           if (! m.isLiveOnly())
+                               m.processValueAt (time, persistBase, persistMod);
                        });
+
+    updatePersistentValue (persistBase, persistMod);
 
     if (newModifierValue != 0.0f)
     {
