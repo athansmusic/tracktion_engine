@@ -2217,6 +2217,10 @@ struct StretchSegment
 
             timestretcher.setSpeedAndPitch ((float) (1.0 / segment.getStretchRatio()),
                                             segment.getTranspose());
+
+            // Lighthouse: the stretcher's latency comes out as leading output, so drop it. Each segment
+            // has its own stretcher, so segment boundaries start on time as well.
+            samplesToDiscard = timestretcher.getStartDelaySamples();
         }
     }
 
@@ -2313,6 +2317,19 @@ struct StretchSegment
         readySamplesStart = 0;
         readySamplesEnd = numRead;
 
+        if (samplesToDiscard > 0 && numRead > 0)
+        {
+            const int toDrop = std::min (samplesToDiscard, numRead);
+            const int remaining = numRead - toDrop;
+
+            if (remaining > 0)
+                for (int i = 0; i < fifo.getNumChannels(); ++i)
+                    juce::FloatVectorOperations::copy (fifo.getWritePointer (i), fifo.getReadPointer (i) + toDrop, remaining);
+
+            samplesToDiscard -= toDrop;
+            readySamplesEnd = numRead = remaining;
+        }
+
         return numRead;
     }
 
@@ -2374,6 +2391,7 @@ struct StretchSegment
 
     const int outputBufferSize = 1024;
     int readySamplesStart = 0, readySamplesEnd = 0;
+    int samplesToDiscard = 0;
     SampleCount readySampleOutputPos = 0;
     const int crossfadeSamples, numChannelsToUse;
     juce::AudioBuffer<float> fifo { numChannelsToUse, outputBufferSize };
@@ -2482,7 +2500,8 @@ HashCode AudioClipBase::getProxyHash()
                      ^ static_cast<HashCode> (clipPos.getOffset().inSeconds() * 9997.0)
                      ^ static_cast<HashCode> (getLoopStart().inSeconds() * 8971.0)
                      ^ static_cast<HashCode> (getLoopLength().inSeconds() * 7733.0)
-                     ^ static_cast<HashCode> (getSpeedRatio() * 877.0);
+                     ^ static_cast<HashCode> (getSpeedRatio() * 877.0)
+                     ^ 0x4c48535452455401LL; // Lighthouse: stretch start-latency fix, so renders from before it aren't reused
 
     auto needsPlainStretch = [&]() { return std::abs (getSpeedRatio() - 1.0) > 0.00001 || (getPitchChange() != 0.0f); };
 

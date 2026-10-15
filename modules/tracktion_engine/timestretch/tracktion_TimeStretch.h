@@ -184,6 +184,13 @@ public:
     */
     int getLatencySamples() const;
 
+    /** Lighthouse: the number of leading output samples, at the current speed, that come out
+        before the first input sample does. Drop this many from the start of a stream rendered
+        from the start so the stretched audio begins exactly on time. 0 for stretchers that
+        have no such delay. Call it after setSpeedAndPitch.
+    */
+    int getStartDelaySamples() const;
+
     /** Returns the latency for a given mode and sample rate without creating a full stretcher.
         Useful for reporting latency to the graph before the stretcher is initialised.
     */
