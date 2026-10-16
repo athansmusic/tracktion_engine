@@ -90,7 +90,9 @@ private:
             {
                 invalidateCache();
             }
-            else if (matchesAnyOf (i, { speed, loopStart, loopLength, loopStartBeats, loopLengthBeats, autoTempo }))
+            // (source: each step's name includes the source file (ClipEffect::getHash). Async, because the clip's
+            // SourceFileReference only picks up the new path in its own listener, which may run after this one.)
+            else if (matchesAnyOf (i, { speed, loopStart, loopLength, loopStartBeats, loopLengthBeats, autoTempo, source }))
             {
                 invalidateCache();
                 triggerAsyncUpdate();
@@ -322,6 +324,11 @@ HashCode ClipEffect::getHash() const
     auto parent = state.getParent();
     auto index = parent.indexOf (state);
     HashCode hash = index ^ static_cast<HashCode> (clipEffects.clip.itemID.getRawID());
+
+    // The source file is part of each step's name: otherwise a clip whose source is replaced would find the
+    // steps rendered from its old file (same clip, same effects) and render the old sound again. (Scaled, so it
+    // doesn't cancel the plain source hash WaveAudioClip::getHash XORs with this.)
+    hash ^= AudioFile (clipEffects.clip.edit.engine, clipEffects.clip.getOriginalFile()).getHash() * 31;
 
     for (int i = 0; i <= index; ++i)
         if (auto ce = clipEffects.getClipEffect (parent.getChild (i)))
